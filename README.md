@@ -14,7 +14,7 @@ slabs flash green. The whole scene is one file, `film.js`, with no 3D models or 
 node server.mjs
 ```
 
-Open http://127.0.0.1:8765/. Space pauses, the arrow keys skip 3 seconds, and `R` picks a new
+Then open `127.0.0.1:8765` in a browser. Space pauses, the arrow keys skip 3 seconds, and `R` picks a new
 random seed.
 
 `film.js` loads its own source to draw on the slabs, so it needs to be served over HTTP;
