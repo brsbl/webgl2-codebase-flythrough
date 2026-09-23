@@ -1,4 +1,4 @@
-# all the way down
+# WebGL2 Codebase Flythrough
 
 A 45-second looping flight through a building made of source code, drawn with WebGL2 for
 [bb](https://getbb.app). Every surface is typeset from `film.js`'s own text, so up close you
