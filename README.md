@@ -46,6 +46,43 @@ writes PNGs to `out/stills/`.
 
 `watch.html` is a bare player for an encoded file at `out/film-web-v7-4k.mp4`.
 
+## Adapting it
+
+A built-in mode for exploring your own codebase is coming to this repo soon. Until then, here
+is how to adapt it yourself.
+
+### Show your own code
+
+`makeAtlas()` in `film.js` loads the text for every surface with
+`fetch(new URL('./film.js', import.meta.url))`. Point that at your own file, or at a
+concatenation of files, and the building is typeset from your code instead.
+
+- Syntax colouring is tuned for JavaScript and GLSL. Adjust the `KW` keyword set and the
+  `tokens()` regex for other languages.
+- The text atlas holds about 1,600 lines of up to 92 characters. Shorter sources repeat;
+  longer ones are cut off.
+
+### Turn it into a walkthrough of your codebase
+
+As written, the film uses code only as a texture. `buildWorld()` places the canyon, towers,
+and ~27k slabs from a random seed, each slab shows an arbitrary run of lines, and `camera(t)`
+flies a fixed 45-second loop. To map the building to a real codebase:
+
+1. **Index the repository.** Write a small script that walks the repo and outputs JSON: the
+   directory tree, each file's path and line count, and its text (or a URL to fetch it).
+2. **Lay out from the index.** Replace the procedural placement in `buildWorld()` with
+   positions derived from the JSON, for example one tower or district per directory and one
+   stack of slabs per file, sized by line count. Keep each slab's per-instance data in the same
+   shape so the existing shaders keep working.
+3. **Give each file its own lines.** Instead of one looping atlas, build several atlases (or
+   load text on demand for what is near the camera) and store which atlas and starting line each
+   slab reads from.
+4. **Add navigation.** Replace `camera(t)` with free-fly or click-to-fly controls, and draw a
+   label for each directory and file so people can find their way.
+
+The shaders, the text rendering on each face, and the plan → build → type → done stages can
+stay as they are.
+
 ## License
 
 MIT
