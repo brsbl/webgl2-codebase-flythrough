@@ -1,0 +1,166 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>render</title>
+<style>html,body{margin:0;background:#111}canvas{width:480px;height:auto;display:block}</style>
+<canvas id="c"></canvas>
+<script type="module">
+const P = new URLSearchParams(location.search);
+const log = (m) => fetch('/log', { method: 'POST', body: String(m) });
+
+// Renders into a texture, then packs BT.709 limited-range yuv420p planes on the GPU so each
+// frame read back is 1.5 bytes per pixel, already top-down and in ffmpeg's planar order.
+function makeYuvPacker(gl, w, h) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const pw = w / 4, ph = (h * 3) / 2 / 1;
+  const rows = h + h / 4 + h / 4;
+  const out = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, out);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, pw, rows);
+  const outFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, outFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const vs = `#version 300 es
+  void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;
+  const fs = `#version 300 es
+  precision highp float;
+  uniform highp sampler2D uSrc;
+  uniform vec2 uSize;
+  out vec4 o;
+  vec3 rgbAt(float x, float row) { return texelFetch(uSrc, ivec2(int(x), int(uSize.y - 1.0 - row)), 0).rgb; }
+  float luma(vec3 c) { return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b; }
+  float Y(float x, float row) { return (16.0 + 219.0 * luma(rgbAt(x, row))) / 255.0; }
+  vec2 UV(float cx, float cy) {
+    vec3 c = (rgbAt(2.0 * cx, 2.0 * cy) + rgbAt(2.0 * cx + 1.0, 2.0 * cy) + rgbAt(2.0 * cx, 2.0 * cy + 1.0) + rgbAt(2.0 * cx + 1.0, 2.0 * cy + 1.0)) * 0.25;
+    float y = luma(c);
+    return (128.0 + 224.0 * vec2((c.b - y) / 1.8556, (c.r - y) / 1.5748)) / 255.0;
+  }
+  void main(){
+    float px = floor(gl_FragCoord.x), py = floor(gl_FragCoord.y);
+    float W = uSize.x, H = uSize.y;
+    vec4 r;
+    if (py < H) {
+      for (int k = 0; k < 4; k++) r[k] = Y(px * 4.0 + float(k), py);
+    } else {
+      float j = py < H * 1.25 ? py - H : py - H * 1.25;
+      int plane = py < H * 1.25 ? 0 : 1;
+      for (int k = 0; k < 4; k++) {
+        float b = px * 4.0 + float(k);
+        float cy = 2.0 * j + (b >= W * 0.5 ? 1.0 : 0.0);
+        float cx = mod(b, W * 0.5);
+        r[k] = UV(cx, cy)[plane];
+      }
+    }
+    o = r;
+  }`;
+  const mk = (type, src) => { const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh); if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh)); return sh; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, mk(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  const vao = gl.createVertexArray();
+  return {
+    fbo,
+    pack(dst) {
+      gl.useProgram(prog);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, outFbo);
+      gl.viewport(0, 0, pw, rows);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(gl.getUniformLocation(prog, 'uSrc'), 0);
+      gl.uniform2f(gl.getUniformLocation(prog, 'uSize'), w, h);
+      gl.bindVertexArray(vao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.readPixels(0, 0, pw, rows, gl.RGBA, gl.UNSIGNED_BYTE, dst);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    },
+  };
+}
+window.onerror = (m, s, l, c, e) => log(`ERR ${m} ${l}:${c} ${e && e.stack}`);
+window.onunhandledrejection = (e) => log(`REJ ${e.reason && (e.reason.stack || e.reason)}`);
+log('page start');
+try {
+  const { createFilm, DURATION } = await import(`./film.js?v=${Date.now()}`);
+  const w = +P.get('w') || 1920, h = +P.get('h') || 1080, fps = +P.get('fps') || 60;
+  const seed = +(P.get('seed') ?? 7);
+  const canvas = document.getElementById('c');
+  canvas.width = w; canvas.height = h;
+  const debug = {}; for (const k of ["ss","fog","plan"]) if (P.has(k)) debug[k] = +P.get(k);
+  debug.log = log; const film = await createFilm(canvas, { seed, preserve: true, debug });
+  const gl = film.gl;
+  log('film ready');
+  const mode = P.get('mode') || 'stills';
+  window.__state = 'running';
+  if (mode === 'stills') {
+    const prefix0 = P.get('prefix') || 's';
+    // grid=ja:1.7,2.2;jr:0.9,0.96 renders every combination by varying debug overrides
+    let combos = [{}];
+    if (P.get('grid')) for (const part of P.get('grid').split(';')) {
+      const [k, vals] = part.split(':');
+      combos = combos.flatMap((c) => vals.split(',').map((v) => ({ ...c, [k]: +v })));
+    }
+    for (const combo of combos) {
+    Object.assign(debug, combo);
+    const prefix = prefix0 + Object.entries(combo).map(([k, v]) => `-${k}${v}`).join('');
+    for (const t of P.get('times').split(',').map(Number)) {
+      const t0 = performance.now();
+      film.render(t);
+      gl.finish();
+      const ms = performance.now() - t0;
+      const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+      await fetch(`/still?name=${prefix}-${t.toFixed(2).padStart(5, '0')}.png`, { method: 'POST', body: blob });
+      log(`still ${t} ${ms.toFixed(1)}ms`);
+    }
+    }
+  } else {
+    const from = +(P.get('from') || 0), to = +(P.get('to') || DURATION * fps);
+    const name = P.get('name') || 'seg';
+    const yuv = P.get('yuv') === '1';
+    await fetch(`/seg/start?name=${name}&w=${w}&h=${h}&fps=${fps}&from=${from}&crf=${P.get('crf') || 14}&master=${P.get('master') || 0}&yuv=${yuv ? 1 : 0}`, { method: 'POST' });
+    const packer = yuv ? makeYuvPacker(gl, w, h) : null;
+    // keep several uploads in flight; the server writes frames in order
+    const LANES = Number(P.get("lanes")) || 4;
+    const bufs = Array.from({ length: LANES }, () => new Uint8Array(yuv ? (w * h * 3) / 2 : w * h * 4));
+    const inflight = new Array(LANES).fill(null);
+    const t0 = performance.now();
+    let tr = 0, lastLog = t0;
+    for (let i = from; i < to; i++) {
+      const lane = i % LANES;
+      if (inflight[lane]) await inflight[lane];
+      const a = performance.now();
+      if (packer) {
+        film.render(i / fps, { target: packer.fbo });
+        packer.pack(bufs[lane]);
+      } else {
+        film.render(i / fps);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bufs[lane]);
+      }
+      tr += performance.now() - a;
+      if (P.get('dry') !== '1') {
+        // big frames upload much faster from headless Chrome as several ~2 MB requests
+        const buf = bufs[lane], parts = Math.max(1, Math.ceil(buf.length / (Number(P.get("part")) || 2e6))), step = Math.ceil(buf.length / parts);
+        inflight[lane] = Promise.all(Array.from({ length: parts }, (_, k) =>
+          fetch(`/seg/frame?name=${name}&i=${i}&part=${k}&parts=${parts}`, { method: 'POST', body: buf.subarray(k * step, Math.min(buf.length, (k + 1) * step)) })
+            .then(async (r) => { if (!r.ok) throw new Error(await r.text()); })));
+      }
+      const n = i - from + 1;
+      if (i % 60 === 0 || i === to - 1 || performance.now() - lastLog > 20000) (lastLog = performance.now()), log(`${name} frame ${i} ${((performance.now() - t0) / n).toFixed(1)}ms/f render ${(tr / n).toFixed(1)}`);
+    }
+    await Promise.all(inflight.filter(Boolean));
+    await fetch(`/seg/end?name=${name}`, { method: 'POST' });
+  }
+  window.__state = 'done';
+  document.title = 'done';
+  log('done');
+} catch (e) {
+  window.__state = 'error';
+  log(`FAIL ${e.stack || e}`);
+}
+</script>

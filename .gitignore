@@ -1,0 +1,4 @@
+out/
+.session
+*.log
+.DS_Store

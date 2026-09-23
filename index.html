@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>all the way down — bb</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0d0c0b; overflow: hidden; }
+  body { display: grid; place-items: center; font: italic 13px/1.4 "Hoefler Text", Baskerville, Georgia, serif; color: #b9b2a6; }
+  canvas { display: block; width: min(100vw, calc(100vh * 16 / 9)); aspect-ratio: 16 / 9; cursor: crosshair; }
+  .caption { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; padding: 14px 20px; pointer-events: none; letter-spacing: 0.02em; transition: opacity 1.2s ease; }
+  .caption span { opacity: 0.75; }
+  .idle .caption { opacity: 0; }
+  .loading { position: fixed; inset: 0; display: grid; place-items: center; transition: opacity 1s ease; pointer-events: none; }
+  .ready .loading { opacity: 0; }
+  button.tilt { position: fixed; top: 14px; right: 16px; font: inherit; color: inherit; background: none; border: 1px solid #5a554e; border-radius: 999px; padding: 4px 12px; display: none; }
+</style>
+</head>
+<body>
+<canvas id="film"></canvas>
+<div class="loading">preparing the paper…</div>
+<div class="caption"><span id="edition"></span><span id="hint">move to shift the light · r for another edition · space to pause</span></div>
+<button class="tilt" id="tilt">tilt to look</button>
+<script type="module">
+import { createFilm, DURATION } from './film.js';
+
+const params = new URLSearchParams(location.search);
+let seed = params.has('seed') ? +params.get('seed') : 1 + Math.floor(Math.random() * 9999);
+const canvas = document.getElementById('film');
+const edition = document.getElementById('edition');
+const showSeed = () => {
+  edition.textContent = `all the way down — edition no. ${String(seed).padStart(4, '0')}`;
+  const u = new URL(location.href); u.searchParams.set('seed', seed); history.replaceState(null, '', u);
+};
+
+// Render below the display resolution when the GPU cannot keep up; time always runs in real seconds.
+let scale = Math.min(devicePixelRatio || 1, 2) * 0.6;
+function fit() {
+  const r = canvas.getBoundingClientRect();
+  const w = Math.max(320, Math.round(r.width * scale)), h = Math.round(w * 9 / 16);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+fit();
+const film = await createFilm(canvas, { seed });
+showSeed();
+document.body.classList.add('ready');
+
+// The light follows the viewer: pointer on desktop, the phone's tilt on mobile.
+let target = null, tilt = [0, 0], lightAngle = null;
+addEventListener('pointermove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  target = [((e.clientX - r.left) / r.width) * 2 - 1, -(((e.clientY - r.top) / r.height) * 2 - 1)];
+  wake();
+});
+addEventListener('pointerleave', () => { target = null; });
+function onOrient(e) {
+  if (e.gamma == null) return;
+  target = [Math.max(-1, Math.min(1, e.gamma / 35)), Math.max(-1, Math.min(1, (e.beta - 45) / 35))];
+}
+const tiltButton = document.getElementById('tilt');
+if (typeof DeviceOrientationEvent !== 'undefined' && 'ontouchstart' in window) {
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    tiltButton.style.display = 'block';
+    tiltButton.onclick = async () => {
+      if ((await DeviceOrientationEvent.requestPermission()) === 'granted') addEventListener('deviceorientation', onOrient);
+      tiltButton.style.display = 'none';
+    };
+  } else addEventListener('deviceorientation', onOrient);
+}
+
+let idleTimer;
+function wake() {
+  document.body.classList.remove('idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => document.body.classList.add('idle'), 4000);
+}
+wake();
+
+let paused = false, clock = +(params.get('t') || 0), last = performance.now();
+addEventListener('keydown', (e) => {
+  if (e.key === ' ') { paused = !paused; e.preventDefault(); }
+  else if (e.key === 'ArrowRight') clock += 3;
+  else if (e.key === 'ArrowLeft') clock -= 3;
+  else if (e.key === 'r' || e.key === 'R') { seed = 1 + Math.floor(Math.random() * 9999); film.reseed(seed); showSeed(); }
+  wake();
+});
+
+let frames = 0, spent = 0;
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+  if (!paused) clock = (clock + dt) % DURATION;
+  if (target) {
+    tilt = [tilt[0] + (target[0] - tilt[0]) * 0.06, tilt[1] + (target[1] - tilt[1]) * 0.06];
+    const a = Math.atan2(tilt[1], tilt[0]);
+    lightAngle = lightAngle == null ? a : lightAngle + Math.atan2(Math.sin(a - lightAngle), Math.cos(a - lightAngle)) * 0.08;
+  } else {
+    tilt = [tilt[0] * 0.97, tilt[1] * 0.97];
+    if (lightAngle != null && Math.hypot(...tilt) < 0.02) lightAngle = null;
+  }
+  film.render(clock, { tilt, lightAngle: lightAngle ?? undefined });
+  // adapt resolution to keep the motion fluid
+  frames++; spent += dt;
+  if (frames === 40) {
+    const avg = spent / frames;
+    const max = Math.min(devicePixelRatio || 1, 2);
+    if (avg > 0.045 && scale > 0.35) { scale *= 0.85; fit(); }
+    else if (avg < 0.022 && scale < max) { scale = Math.min(scale * 1.1, max); fit(); }
+    frames = 0; spent = 0;
+  }
+  requestAnimationFrame(frame);
+}
+addEventListener('resize', fit);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
